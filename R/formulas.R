@@ -32,3 +32,47 @@ estbetaRestr <- function(X, y, A, c) {
     (c - A %*% beta_hat)
   
 }
+
+
+matrixX <- function(...) {
+  out <- cbind(1, ...)
+  n_var <- ncol(out) - 1
+  colnames(out) <- c("Intercept", paste0("x", seq(1, n_var)))
+  return(out)
+}
+
+
+matrixX(c(1,2), c(4,5))
+
+
+funcShaded <- function(x, estF = 0.0978698) {
+  y <- df(x, 1, 44)
+  y[x < estF] <- NA
+  return(y)
+}
+
+p9 <- ggplot(data.frame(x = c(0, 1)), aes(x = x)) +
+  stat_function(fun = df, args = list(1, 44), size = 1.5) +
+  stat_function(fun = funcShaded, geom = "area", fill = "#000917", alpha = 0.2) +
+  geom_vline(xintercept = 1) +
+  scale_x_continuous(
+    name = "x", breaks = seq(0, 3, 0.5), limits=c(0, 3)
+  ) +
+  scale_y_continuous(name = "f(x)") +
+  ggtitle("Normal function curves of probabilities") +
+  scale_colour_brewer(palette = "Accent") +
+  theme_bw() +
+  theme(axis.line = element_line(size = 1, colour = "black"),
+        panel.grid.major = element_line(colour = "#d3d3d3"),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(), panel.background = element_blank(),
+        plot.title = element_text(size = 14, family = "Tahoma", face = "bold"),
+        text=element_text(family="Tahoma"),
+        axis.text.x=element_text(colour="black", size = 9),
+        axis.text.y=element_text(colour="black", size = 9),
+        legend.position = "bottom")
+p9
+
+
+
+t(beta_hat - beta_res) %*% t(X) %*% X %*% (beta_hat - beta_res) 
