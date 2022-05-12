@@ -1,0 +1,241 @@
+---
+title: "Relatório 1"
+author: "Renan de Oliveira da Cruz"
+date: '2022-05-12'
+output: pdf_document
+---
+
+Abaixo temos bibliotecas que serão utilizadas nesse notebook.
+
+```{r}
+library(readr)
+library(ggplot2)
+library(readr)
+library(stringr)
+library(MASS)
+library(dplyr)
+library(tidyr)
+```
+
+Leitura dos dados
+
+```{r}
+basic_info <- read_csv("basic_info.csv", show_col_types = FALSE)
+detailed_info <- read_csv("detailed_info.csv",  show_col_types = FALSE)
+dados <- basic_info %>% left_join(detailed_info, by = "ID")
+glimpse(dados)
+```
+Ao todo temos 19825 linhas e 86. Vamos agora trabalhar para a diminuição do numero de covariáveis.
+
+Vamos tomar uma amostra de tamanho 1000 desses dados.
+
+```{r}
+dados <- dados %>% drop_na() %>% filter(`Release clause` != "</label>")
+set.seed(22)
+dados <- dados[sample(nrow(dados), 1000), ]
+```
+
+
+A principio vamos remover as colunas "...1.x", "ID", "Name", "...1.y" e "DOB" (date of birth).
+
+```{r}
+dadoss <- dados %>% dplyr::select(-`...1.x`, -`ID`, -`Name`, -`...1.y`, -`DOB`)
+```
+
+```{r}
+dadoss$Nationality %>% unique() %>% length()
+```
+
+```{r}
+dadoss$Club %>% unique() %>% length()
+```
+```{r}
+dadoss$Contract %>% unique()
+```
+
+
+```{r}
+dadossc2 <- dadoss %>%
+             dplyr::select(-Nationality, -Club, -Contract, -`Total stat`) %>%
+             mutate(Value = parse_number(Value),
+                    Wage = parse_number(Wage))
+```
+
+```{r}
+dadossc2 <- dadossc2 %>% mutate(`Preferred foot` = as.factor(`Preferred foot`))
+dadossc2 %>% group_by(`Preferred foot`) %>% summarise(n = n())
+```
+```{r}
+dadossc2 %>% group_by(`Work rate`) %>% summarise(n = n()) %>% print()
+dadossc2 <- dadossc2 %>% dplyr::select(-`Work rate`)
+```
+```{r}
+dadossc2 %>% group_by(`Body type`) %>% summarise(n = n()) %>% print()
+dadossc3 <- dadossc2 %>%
+              mutate(body_type = as.factor(word(`Body type`, 1))) %>% 
+              dplyr::select(-`Body type`)
+dadossc3 %>% group_by(body_type) %>% summarise(n = n()) %>% print()
+```
+
+```{r}
+dadossc3 <- dadossc3 %>% dplyr::select(-`Real face`)
+```
+
+
+```{r}
+dadossc4 <- dadossc3 %>%
+             mutate(
+               `Release clause` = ifelse(
+                   `Release clause` == "</label>", NA, `Release clause`
+               ),
+               `Release clause` = parse_number(`Release clause`))
+```
+
+```{r}
+dadossc4 <- dadossc4 %>% dplyr::select(-Traits)
+```
+
+
+# Análise de correlação
+
+```{r}
+data_num <- dadossc4 %>% dplyr::select(where(is.numeric))
+data_num <- data_num %>% drop_na()
+glimpse(data_num)
+```
+
+```{r}
+corr <- cor(data_num)
+#corr
+```
+
+
+Desses numericos uma série de atributos não apresentam descrição e serão desconsiderados
+Podemos ver que alguns atributos estão fortemente correlacionados com outros.
+
+```{r}
+cols_rm <- c("LS", "ST", "RS", "LW", "LF", "CF", "RF", "RW", "LAM", "CAM",
+             "RAM", "LM", "LCM", "CM", "RCM", "RM", "LWB", "LDM", "CDM",
+             "RDM", "RWB", "LB", "LCB", "CB", "RCB", "RB", "GK",
+             "GK Diving", "GK Handling", "GK Kicking", "GK Positioning",
+             "GK Reflexes", "Weak foot", "Skill move",
+             "International reputation")
+dadosrm <- dadossc4[, -which(colnames(dadossc4) %in% cols_rm)]
+```
+
+```{r}
+glimpse(dadosrm)
+```
+
+# Análise de correlação
+
+
+Vamos retirar alguns atributos baseados na correção do seguinte modo.
+
+1. Calculo a correlação 2 a 2 de todos os atributos;
+
+2. Tomo as correlacões que são maiores do que 0.8;
+
+3. Dessas, vejo qual é o atributo que mais aparece, ou seja, o atributos que mais apresenta correlação maior do 0.8 com seus pares.
+
+
+```{r}
+data_num2 <- dadosrm %>%
+               dplyr::select(-Potential) %>%
+               dplyr::select(where(is.numeric)) %>%
+               drop_na()
+all_rm_vars <- c()
+for(j in 1:50) {
+  corr <- cor(data_num2)
+  corr[lower.tri(corr) == FALSE] <- NA
+  cordf <- data.frame()
+  for (i in seq(1, ncol(corr))) {
+    corr_coli <- corr[, i]
+    names(corr_coli) <- NULL
+    df_aux <- data.frame(
+      Variavel1 = rownames(corr),
+      Variavel2 = colnames(corr)[i],
+      Correlacao = corr_coli
+    )
+    cordf <- rbind(cordf, df_aux)
+  }
+  cordf <- cordf %>% filter(!is.na(Correlacao))
+  corr__ <- cordf %>% filter(Correlacao > 0.9)
+  if(0 %in% dim(corr__)) break
+  var <- corr__ %>%
+             group_by(Variavel2) %>%
+             summarise(n = n()) %>% 
+             arrange(-n) %>%
+             head(1) %>%
+             pull(Variavel2)
+  data_num2 <- data_num2[, -which(colnames(data_num2) == var)]
+  all_rm_vars <- c(all_rm_vars, var)
+} 
+all_rm_vars
+```
+
+Segundo o critério que definimos devemos retirar as colunas acima
+
+```{r}
+dados_m <- dadosrm[, -which(colnames(dadosrm) %in% all_rm_vars)]
+glimpse(dados_m)
+```
+
+Vamos agora utilizar diferentes métodos de seleção de variáveis.
+
+```{r}
+model <- lm(Potential ~ ., data = dados_m)
+```
+
+```{r}
+stepAIC(model, direction = "both", trace = -1)
+```
+
+```{r}
+model2 <- lm(formula = Potential ~ Age + Overall + Value + Wage + Weight + 
+           `Release clause` + Crossing + Volleys + `Long Passing` + 
+           `Ball Control` + `Sprint Speed` + Jumping + Stamina + `Long Shots` + 
+            body_type, data = dados_m)
+```
+
+```{r}
+# Distancia de Cook
+
+dcookAnalysis <- function(model, y_values) {
+  cook_vec <- cooks.distance(model)
+  dfcook <- data.frame(
+    Index = seq(1, length(cook_vec)),
+    Cook = cook_vec
+  )
+  corte <- c(4/nrow(dfcook))
+  chart <- ggplot(dfcook, aes(x = Index, y = Cook)) +
+             geom_point() + 
+             geom_segment(aes(x = Index, xend = Index, y = 0, yend = Cook)) +
+             geom_hline(yintercept = corte, color = "red") +
+             ggtitle("Cook's Distance")
+  dfcook1 <- dfcook %>% filter(Cook > corte)
+  out <- dfcook1 %>% mutate(y = y_values[dfcook1$Index]) %>% arrange(-Cook)
+  return(list(threshold = corte, chartCook = chart, table = out))
+}
+
+dffitAnalysis <- function(model, y_values) {
+  dffit_vec <- dffits(model)
+  dfdffit <- data.frame(
+    Index = seq(1, length(dffit_vec)),
+    Dffits = abs(dffit_vec)
+  )
+  p <- length(model$coefficients)
+  n <- nrow(dfdffit)
+  corte <- 2 * sqrt(p/n)
+  chart <- ggplot(dfdffit, aes(x = Index, y = Dffits)) +
+             geom_point() + 
+             geom_segment(aes(x = Index, xend = Index, y = 0, yend = Dffits)) +
+             geom_hline(yintercept = corte, color = "red") +
+             ggtitle("Dffits") + ylab("| Dffits |")
+  dfdffit1 <- dfdffit %>% filter(Dffits > corte)
+  out <- dfdffit1 %>% mutate(y = y_values[dfdffit1$Index]) %>% arrange(-Dffits)
+  return(list(threshold = corte, chartDffits = chart, table = out))
+}
+  
+```
+
