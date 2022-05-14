@@ -1,0 +1,450 @@
+---
+title: "Códigos - Modelos de Regressão Linear (FIFA 22)"
+output: pdf_document
+toc: TRUE
+number_sections: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Inicialmente carreguemos todas as bibliotecas a serem utilizadas nessa análise:
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+library(readr)
+library(ggplot2)
+library(readr)
+library(stringr)
+library(MASS)
+library(dplyr)
+library(tidyr)
+library(dplyr)
+library(goftest)
+library(nortest)
+library(faraway)
+library(ggridges)
+library(Hmisc)
+library(GGally)
+library(glmnet)
+```
+
+e o conjunto de dados, que por estar dividido em dois arquivos, precisa ser agrupado:
+
+```{r, message=FALSE}
+basic_info <- read_csv("basic_info.csv", show_col_types = FALSE)
+detailed_info <- read_csv("detailed_info.csv",  show_col_types = FALSE)
+dados <- basic_info %>% left_join(detailed_info, by = "ID")
+```
+
+Vamos observar todas as primeiras linhas de cada co-váriavel:
+
+```{r}
+glimpse(dados)
+```
+
+Ao todo temos 19825 linhas e 86 colunas.
+
+# Retirando colunas
+
+Vamos retirar algumas colunas que julgamos ser não relevantes para o propósito desse trabalho.
+
+As colunas abaixo vamos retirar devido ao fato de não estarem bem documentadas. Isto é, não apresentam uma descrição clara. 
+
+```{r}
+cols_rm <- c("LS", "ST", "RS", "LW", "LF", "CF", "RF", "RW", "LAM", "CAM",
+             "RAM", "LM", "LCM", "CM", "RCM", "RM", "LWB", "LDM", "CDM",
+             "RDM", "RWB", "LB", "LCB", "CB", "RCB", "RB", "GK",
+             "GK Diving", "GK Handling", "GK Kicking", "GK Positioning",
+             "GK Reflexes", "Weak foot", "International reputation",
+             "Real face", "Total stat") # 36 colunas
+dados1 <- dados[, -which(colnames(dados) %in% cols_rm)]
+```
+
+As colunas "...1.x", "ID", "Name", "...1.y", "DOB" também serão retiradas
+
+```{r}
+dados1 <- as.data.frame(dados1)
+rownames(dados1) <- paste(dados1$Name, dados1$ID, sep = "_")
+dados2 <- dados1 %>% dplyr::select(-`...1.x`, -`ID`, -`Name`, -`...1.y`, -`DOB`)
+glimpse(dados2)
+```
+
+Algumas variáveis categóricas também iremos retirar devido a grande quantidade de valores únicos.
+
+```{r}
+print(paste0("Nº de valores unicos Nationality: ", length(unique(dados2$Nationality))))
+print(paste0("Nº de valores unicos Club: ", length(unique(dados2$Club))))
+print(paste0("Nº de valores unicos Contract: ", length(unique(dados2$Contract))))
+print(paste0("Nº de valores unicos Work rate: ", length(unique(dados2$`Work rate`))))
+print(paste0("Nº de valores unicos Traits: ", length(unique(dados2$Traits))))
+
+dados3 <- dados2[,
+            -which(colnames(dados2) %in% c("Nationality", "Club", "Contract", "Work rate", "Traits"))]
+glimpse(dados3)
+```
+
+Vamos agora tratar as variáveis categóricas que restaram.
+
+```{r}
+dados3 %>% dplyr::select(where(is.character)) %>% glimpse()
+```
+
+```{r}
+dados3 <- dados3 %>% filter(`Release clause` != "</label>")
+```
+
+
+```{r}
+dados4 <- dados3 %>%
+            mutate(
+              Value = str_trim(Value),
+              Wage = str_trim(Wage),
+              `Release clause` = str_trim(`Release clause`)) %>% 
+            mutate(
+              l_value = str_sub(Value, -1),
+              l_wage = str_sub(Wage, -1),
+              l_rc = str_sub(`Release clause`, -1)
+            )
+print(unique(dados4$l_value))
+print(unique(dados4$l_wage))
+print(unique(dados4$l_rc))
+```
+
+Então Value está em Milhões e em Mil enquanto Wage está em Mil
+Vamos transformar O que está em milhão do Value em mil
+
+```{r}
+dados5 <- dados4 %>%
+            mutate(
+              Value = parse_number(Value),
+              Wage = parse_number(Wage),
+              `Release clause` = parse_number(`Release clause`)  
+            ) 
+dados5[dados5$l_value == "M", "Value"] <- 1000 * dados5[dados5$l_value == "M", "Value"]
+dados5[dados5$l_value == "0", "Value"] <- 0
+
+dados5[dados5$l_wage == "M", "Wage"] <- 1000 * dados5[dados5$l_wage == "M", "Wage"]
+dados5[dados5$l_wage == "0", "Wage"] <- 0
+
+dados5[dados5$l_rc == "M", "Release clause"] <- 1000 * dados5[dados5$l_rc == "M", "Release clause"]
+dados5[dados5$l_rc == "0", "Release clause"] <- 0
+
+dados5 <- dados5 %>% dplyr::select(-l_value, -l_wage, -l_rc)
+glimpse(dados5)
+```
+
+Vamos agora as variáveis "Preferred foot" e "Body type".
+
+```{r}
+dados6 <- dados5 %>% 
+            mutate(
+              body_type = as.factor(word(`Body type`, 1)),
+              preferred_foot = as.factor(`Preferred foot`)
+            ) %>%
+            select(-`Body type`, -`Preferred foot`)
+print("Body type")
+print(table(dados6$body_type))
+print("Preferred foot")
+print(table(dados6$preferred_foot))
+```
+```{r}
+dados7 <- dados6 %>% drop_na()
+glimpse(dados7)
+```
+
+Ao fim desse pré-processamento de dados ficamos com 40 colunas, sendo:
+
+* 1 variável resposta: Potential;
+
+* 39 variáveis independentes, sendo duas destas variáveis categóricas.
+
+Agora, iremos selecionar cerca de 500 valores desses para realizar a modelagem.
+Isso ocorrerá de forma aleatória, chamada de Amostragem Aleatória Simples sem reposição.
+
+Isso se justifica devido ao fato de que os dados obtidos são de todos os jogadores do jogo. Ou seja, temos aqui o conjunto universo, sendo assim, vamos analisar uma amostra desse universo.
+No processo de amostragem iremos setar uma semente, a saber: 22.
+
+
+```{r}
+set.seed(22)
+dados_m <- dados7[sample(nrow(dados7), 500, replace = FALSE), ]
+```
+
+
+# Análise descritiva
+
+Vamos primeiro a análise da variável resposta: Potential
+
+```{r}
+sturges_rule <- function(x) return(ceiling(log(length(x), 2)) + 1)
+
+chart_hist_y <- ggplot(dados_m, aes(x = Potential)) +
+                  geom_histogram(
+                    aes(y = ..density..),
+                    bins = sturges_rule(dados_m$Potential),
+                    fill = "#6497b1"
+                  ) +
+                  geom_density() +
+                  labs(title = "Histograma Potencial")
+chart_hist_y
+```
+
+Pelo histograma acima podemos observar uma certa simetria, a qual pode ser um indicativo de que a resposta apresenta normalidade.
+
+```{r}
+qqnorm(dados_m$Potential)
+qqline(dados_m$Potential)
+```
+
+Pelo QQ-Plot acima podemos observar que os valores amostrais figuram-se próximos dos valores teóricos. O que corrobora a normalidade.
+
+Vamos aplicar testes de hipóteses sobre a variável resposta.
+
+```{r}
+testeNorm <- function(dados) {
+  xb <- mean(dados)
+  sx <- sd(dados)
+  t1 <- ks.test(dados, "pnorm", xb, sx) # KS
+  t2 <- lillie.test(dados) # Lilliefors
+  t3 <- cvm.test(dados) # Cramér-von Mises
+  if(length(dados) <= 5000) {
+    t4 <- shapiro.test(dados) # Shapiro-Wilk
+  } else {
+    t4 <- list(method = "Shapiro-Wilk", statistic = NA, p.value = NA)
+  } 
+  if(length(dados) <= 5000) {
+    t5 <- sf.test(dados) # Shapiro-Francia
+  } else {
+    t5 <- list(method = "Shapiro-Francia", statistic = NA, p.value = NA)
+  } 
+  t6 <- ad.test(dados) # Anderson-Darling
+
+  # Tabela de resultados
+  testes <- c(t1$method, t2$method, t3$method, t4$method, t5$method, t6$method)
+  estt <- as.numeric(c(t1$statistic, t2$statistic, t3$statistic,
+                       t4$statistic, t5$statistic, t6$statistic))
+  valorp <- c(t1$p.value, t2$p.value, t3$p.value, t4$p.value, t5$p.value,
+              t6$p.value)
+  resultados <- cbind(estt, valorp)
+  rownames(resultados) <- testes
+  colnames(resultados) <- c("Estatística", "Valor - p")
+  return(resultados)
+}
+
+testeNorm(dados_m$Potential)
+```
+
+Pelos testes de Kolmogorov-Smirnov, Cramer-von Mises, Shapiro-Wilk, Shapiro-Francia e Anderson-Darling não rejeitamos a hipótese nula de normalidade à um nível de significancia de 1\%.
+
+Vamos a análise dos atributos body_type e preferred_foot
+
+## body_type
+
+```{r}
+chart_bt <- ggplot(dados_m, aes(x = Potential, y = body_type, fill = body_type)) +
+              geom_density_ridges() +
+              theme_ridges(center_axis_labels = TRUE) + 
+              theme(legend.position = "none") +
+              labs(title = "Distribuição do Potential por Body Type",
+                   y = "Body Type", )
+chart_bt 
+```
+
+## preferred_foot
+
+```{r}
+chart_pf <- ggplot(dados_m, aes(x = Potential, y = preferred_foot, fill = preferred_foot)) +
+              geom_density_ridges() +
+              theme_ridges(center_axis_labels = TRUE) + 
+              theme(legend.position = "none") +
+              labs(title = "Distribuição do Potential por canhotos e destros",
+                   y = "Preferred foot")
+chart_pf 
+```
+
+Vamos agora, analisar o numero de outliers em cada variável. Para isso iremos utilizar o método do boxplot. AInda, vamos tomar algumas estatísticas descritivas.
+
+```{r}
+numbers_outliers__ <- function(x) {
+  pri <- quantile(x, 0.25)
+  seg <- quantile(x, 0.5)
+  ter <- quantile(x, 0.75)
+  iqr <- abs(ter - pri)
+  bounds <- c(pri - 1.5 * iqr, ter + 1.5 * iqr)
+  num <- sum(x < bounds[1]) + sum(x > bounds[2])
+  return(num)
+}
+
+dados_m_n <- dados_m %>% dplyr::select(where(is.numeric))
+
+descdf <- t(apply(dados_m_n, 2, summary)) %>% as.data.frame()
+sd_df <- apply(dados_m_n, 2, sd)
+apresult <- apply(dados_m_n, 2, numbers_outliers__)
+
+descdf <- descdf %>%
+            mutate(SD  = sd_df, OutliersNumber = apresult)
+
+descdf %>% arrange(-OutliersNumber)
+```
+
+Vamos à análise da correlação dos dados.
+
+Como temos 38 variáveis numéricas fica inviável a visualização da matriz de correlação. Sendo assim, vamos mostrar abaixo os pares de covariáveis que apresentam correlação maior do 0.8.
+
+```{r}
+# ++++++++++++++++++++++++++++
+# flattenCorrMatrix
+# ++++++++++++++++++++++++++++
+# cormat : matrix of the correlation coefficients
+# pmat : matrix of the correlation p-values
+flattenCorrMatrix <- function(cormat, pmat) {
+  ut <- upper.tri(cormat)
+  data.frame(
+    row = rownames(cormat)[row(cormat)[ut]],
+    column = rownames(cormat)[col(cormat)[ut]],
+    cor  =(cormat)[ut],
+    p = pmat[ut]
+  )
+}
+
+my_data <- dados_m %>% select(where(is.numeric), -Potential)
+res2 <- rcorr(as.matrix(my_data))
+correl <- flattenCorrMatrix(res2$r, res2$P)
+correl__ <- correl %>% filter(cor > 0.8) %>% arrange(desc(cor))
+correl__
+```
+
+Sendo assim, segundo o critério da correlação vamos retirar dos dados as covariáveis abaixo.
+
+```{r}
+atri <- unique(correl__$column)
+atri
+```
+
+```{r}
+dados_m1 <- dados_m[, -which(colnames(dados_m) %in% atri)]
+# dados_m1n <- dados_m1 %>% dplyr::select(where(is.numeric))
+# ggpairs(dados_m1n,
+#         title = "Correlogram chart") 
+```
+
+# Seleção de variáveis:
+
+Temos as seguintes variáveis consideradas.
+
+```{r}
+glimpse(dados_m1)
+```
+
+Dessas vamos utilizar métodos de seleção de modelos para tentar reduzir a dimensionalidade. Para isso, faremos uso das seguintes técnicas:
+
+```{r}
+model0 <- lm(Potential ~ ., data = dados_m1)
+```
+
+```{r}
+vif_info <- vif(model0)
+vif_df <- data.frame(
+  Vif = vif_info
+)
+vif_df %>% arrange(-Vif)
+```
+
+Atributo Finishing apresenta valor de VIF maior do que 5 então será retirado do modelo.
+
+```{r}
+dados_m2 <- dados_m1 %>% dplyr::select(-Finishing)
+model1 <- lm(Potential ~ ., data = dados_m2)
+stepAIC(model1, direction = "both")
+```
+
+
+```{r}
+library(glmnet)
+X_matrix <- model.matrix(model0)[, -1]
+y_obser <- unlist(dados_m1[, "Potential"])
+
+cv_lasso <- cv.glmnet(X_matrix, y_obser, alpha = 1,
+                      nfolds = 10, type.measure = "mse")
+
+plot(cv_lasso)
+```
+
+```{r}
+melhor_lambda <- cv_lasso$lambda.min
+print(paste0("Melhor lambda: ", melhor_lambda))
+
+best_lasso <- glmnet(X_matrix, y_obser, alpha = 1, lambda = melhor_lambda)
+# Coeficiente obtidos
+coef(best_lasso)
+```
+
+
+```{r}
+names(best_lasso$beta[, 1])[best_lasso$beta[, 1] != 0]
+```
+
+
+
+
+```{r}
+#crPlots()
+```
+
+
+
+# Ajuste do modelo nas variáveis resultantes
+
+
+Para então observar pontos outliers utilizando a distância Dcook
+
+```{r, collapse=TRUE}
+dcookAnalysis <- function(model, y_values) {
+  cook_vec <- cooks.distance(model)
+  dfcook <- data.frame(
+    Index = seq(1, length(cook_vec)),
+    Cook = cook_vec
+  )
+  corte <- c(4/nrow(dfcook))
+  chart <- ggplot(dfcook, aes(x = Index, y = Cook)) +
+             geom_point() + 
+             geom_segment(aes(x = Index, xend = Index, y = 0, yend = Cook)) +
+             geom_hline(yintercept = corte, color = "red") +
+             ggtitle("Cook's Distance")
+  dfcook1 <- dfcook %>% filter(Cook > corte)
+  out <- dfcook1 %>% mutate(y = y_values[dfcook1$Index]) %>% arrange(-Cook)
+  return(list(threshold = corte, chartCook = chart, table = out))
+}
+```
+
+<!-- Observemos o QQ-Plot dos resíduos: -->
+
+<!-- ```{r Fig2, echo=TRUE, fig.height=6.5, fig.width=12} -->
+<!-- qqnorm(lr2$residuals, main = 'QQ-Plot') -->
+<!-- qqline(lr2$residuals) -->
+<!-- ``` -->
+
+<!-- Valores ajustados x Resíduos -->
+
+<!-- ```{r Fig3, echo=TRUE, fig.height=6.5, fig.width=12} -->
+<!-- plot(lr2$fitted.values ,lr2$residuals) -->
+<!-- ``` -->
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
