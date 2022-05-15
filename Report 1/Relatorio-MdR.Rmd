@@ -27,6 +27,9 @@ library(ggridges)
 library(Hmisc)
 library(GGally)
 library(glmnet)
+library(car)
+library(lmtest)
+library(leaps)
 ```
 
 e o conjunto de dados, que por estar dividido em dois arquivos, precisa ser agrupado:
@@ -344,14 +347,16 @@ model0 <- lm(Potential ~ ., data = dados_m1)
 ```
 
 ```{r}
-vif_info <- vif(model0)
+vif_info <- car::vif(model0)
 vif_df <- data.frame(
-  Vif = vif_info
+  Vif = vif_info[, "GVIF"]
 )
 vif_df %>% arrange(-Vif)
 ```
 
 Atributo Finishing apresenta valor de VIF maior do que 5 então será retirado do modelo.
+
+Agora vamos utilizar o stepAIC com direção both para escolher as cováriaveis
 
 ```{r}
 dados_m2 <- dados_m1 %>% dplyr::select(-Finishing)
@@ -359,10 +364,10 @@ model1 <- lm(Potential ~ ., data = dados_m2)
 stepAIC(model1, direction = "both")
 ```
 
+Agora vamos utilizar a seleção de variáveis via Regressão Lasso.
 
 ```{r}
-library(glmnet)
-X_matrix <- model.matrix(model0)[, -1]
+X_matrix <- model.matrix(model1)[, -1]
 y_obser <- unlist(dados_m1[, "Potential"])
 
 cv_lasso <- cv.glmnet(X_matrix, y_obser, alpha = 1,
@@ -385,19 +390,195 @@ coef(best_lasso)
 names(best_lasso$beta[, 1])[best_lasso$beta[, 1] != 0]
 ```
 
-
-
+O modelo que a intersecção dos métodos supracitados é com as seguintes covariáveis: Age, Overall, Height, Weight, Skill move, Crossing, Stamina, Strength, Aggression e body_type.
 
 ```{r}
-#crPlots()
+model3 <- lm(Potential ~ Age + Overall + Height + Weight + `Skill move` + 
+             Crossing + Stamina + Strength + Aggression + body_type, data = dados_m2)
 ```
 
+Vamos agora ao cálculo do modelo com maior R2 ajutado. 
 
+```{r}
+X_ <- model.matrix(model3)[, -1]
+models__ <- leaps(X_, y_obser, method= "adjr2")
 
-# Ajuste do modelo nas variáveis resultantes
+modelos <- leaps(X_, y_obser)
+saida <- modelos$which
 
+colnames(saida) <- colnames(X_)
+resp <- as.matrix(apply(saida, 1, create_models <- function(param) {
+	texto = ""
+	for (i in 1:length(param)) {
+		if (param[i] != FALSE) {
+			if (texto == "") {
+			  texto = paste(names(param)[i], sep="")
+			} else {
+			  texto = paste(texto, " + ", names(param)[i], sep="")
+			}
+		}
+	}
+	return (texto)
+}))
 
-Para então observar pontos outliers utilizando a distância Dcook
+dfR2 <- data.frame(Model = resp, R2Ajs = models__$adjr2)
+row.names(dfR2) <- NULL
+print(paste0("Melho modelo: ", dfR2[which.max(dfR2$R2Ajs), "Model"]))
+dfR2 %>% arrange(-R2Ajs) %>% head(5)
+```
+
+# Modelo escolhido
+
+De acordo com todos os métodos supramencionados temos o modelo final.
+
+```{r}
+modelf0 <- lm(Potential ~ Age + Overall + Height + Weight + `Skill move` + 
+             Crossing + Stamina + Strength + Aggression + body_type,
+             data = dados_m2)
+summary(modelf0)
+```
+
+Note que a soma das estimativas de Height e Weight são muito próximas de zero. Sendo assim, vamos testar se essa soma de fato é igual a zero.
+
+```{r}
+linearHypothesis(modelf0, c("Height + Weight = 0"))
+```
+
+Com um nível de significância de 1\% não rejeitamos a hipótese nula e concluímos a favor da soma é igual a zero. Sendo assim, vamos retirar essas duas colunas.
+
+```{r}
+modelf2 <- lm(Potential ~ Age + Overall + `Skill move` + 
+             Crossing + Stamina + Strength + Aggression + body_type,
+             data = dados_m2)
+summary(modelf2)
+```
+
+Observamos a mesma relação supracitada com as variáveis Aggression e Crossing. Vamos ao teste.
+
+```{r}
+linearHypothesis(modelf2, c("Aggression + Crossing = 0"))
+```
+
+Com um nível de significância de 1\% não rejeitamos a hipótese nula e concluímos a favor da soma é igual a zero. Sendo assim, vamos retirar essas duas colunas.
+
+```{r}
+modelf3 <- lm(Potential ~ Age + Overall + `Skill move` + Stamina + Strength + 
+                body_type,
+             data = dados_m2)
+summary(modelf3)
+```
+
+Pode ser que Age e Overall também somem 0. Vamos testar isso.
+
+```{r}
+linearHypothesis(modelf3, c("Age + Overall = 0"))
+```
+
+Com um nível de significância de 1\% rejeitamos a hipótese nula e concluímos a favor da soma não é igual a zero.
+
+Em razão disso temos o modelo
+
+```{r}
+modelf <- lm(Potential ~ Age + Overall + `Skill move` + Stamina + Strength + 
+                         body_type,
+             data = dados_m2)
+summary(modelf)
+```
+
+Análise da linearidade
+
+```{r}
+crPlots(modelf)
+```
+
+A linha azul mostra os residuos esperados se a relação entre o preditor e a resposta for linear. A linha rosa mostra os residuos ajustados. As variáveis apresentam essas duas retas próximas umas das outras.
+
+```{r}
+testeNorm(modelf$residuals)
+```
+
+Ainda, o teste de normalidade dos residuos é rejeitado a um nível de significância de 1\% todos os testes.
+ 
+Percebemos que ajustar um modelo de sem a variável "Age" faz com que os testes de normalidade dos residuos do modelo não seja rejeitado. Todavia a retirada dessa variável provoca uma queda relevante no R2 ajustado, como visto abaixo.
+
+```{r}
+modelf1 <- lm(Potential ~  Overall + Height + Weight + `Skill move` + 
+             Crossing + Stamina + Strength + Aggression + body_type,
+             data = dados_m2)
+summary(modelf1)
+```
+
+```{r}
+testeNorm(modelf1$residuals)
+```
+
+Sendo assim, mesmo que a normalidade seja rejeitada nos testes de hipóteses optaremos por permanecer com o modelo contendo a variável "Age".
+
+```{r}
+par(mfrow = c(2, 2))
+plot(modelf)
+```
+
+* Resíduos vs Ajustados: tal gráfico é utilizado para verificar a premissa de linearidade. Caso os resíduos estejam distribuídos em torno de uma linha horizontal sem padrões distintos, tem-se um indicativo de haver uma relação linear. É o que ocorre no gráfico acima
+
+* QQ normal: é utilizado para verificar a suposição de normalidade dos resíduos. Caso os pontos estejam dispostos próximos à reta tracejada, tem-se um indicativo de normalidade. Pelo resultdo acima temos que alguns pontos da reta superior figuram-se pouco acima da reta tracejada.
+
+* Escala-Locação: é útil para verificar a homocedasticidade dos resíduos. Se os resíduos forem espalhados aleatoriamente sem comportamento atípico, a suposição está satisfeita. É o que ocorre nesse caso.
+
+* Resíduos vs Leverage: tal gráfico é usado para identificar pontos influentes. Valores influentes são valores extremos que podem influenciar nos resultados da regressão quando incluídos ou excluídos da análise.
+
+## Testes de Homocedasticidade
+
+```{r}
+print(bptest(modelf))
+print(gqtest(modelf, fraction = 0.2, alternative = 'two.sided'))
+```
+
+Pelo teste de Goldfeld-Quandt nao rejeitamos a Homocedasticidade a 1\% de significancia.
+
+Agora, vamos observar os pontos de alavanca.
+
+```{r}
+leveragePoints <- function(model) {
+  hii <- hatvalues(model)
+  p <- length(model$coefficients)
+  n <- length(hii)
+  dfhii <- data.frame(hii = hii) %>% dplyr::arrange(-hii)
+  out <- dfhii %>% dplyr::filter(hii > 2 * (p/n))
+  return(out)
+}
+leverage_result <- leveragePoints(modelf)
+leverage_result
+```
+
+Vamos a visualização dos pontos influentes com a medida DFFIT
+
+```{r}
+dffitAnalysis <- function(model, y_values) {
+  dffit_vec <- dffits(model)
+  dfdffit <- data.frame(
+    Index = seq(1, length(dffit_vec)),
+    Dffits = abs(dffit_vec)
+  )
+  p <- length(model$coefficients)
+  n <- nrow(dfdffit)
+  corte <- 2 * sqrt(p/n)
+  chart <- ggplot(dfdffit, aes(x = Index, y = Dffits)) +
+             geom_point() + 
+             geom_segment(aes(x = Index, xend = Index, y = 0, yend = Dffits)) +
+             geom_hline(yintercept = corte, color = "red") +
+             ggtitle("Dffits") + ylab("| Dffits |")
+  dfdffit1 <- dfdffit %>% filter(Dffits > corte)
+  out <- dfdffit1 %>% mutate(y = y_values[dfdffit1$Index]) %>% arrange(-Dffits)
+  return(list(threshold = corte, chartDffits = chart, table = out))
+}
+dffit_result <- dffitAnalysis(modelf, dados_m[, "Potential"])
+dffit_result
+```
+
+Como podemos ver temos cerca de 31 valores influentes segundo o DFFIT.
+
+Agora, vamos então observar pontos influentes utilizando a distância Dcook
 
 ```{r, collapse=TRUE}
 dcookAnalysis <- function(model, y_values) {
@@ -416,35 +597,116 @@ dcookAnalysis <- function(model, y_values) {
   out <- dfcook1 %>% mutate(y = y_values[dfcook1$Index]) %>% arrange(-Cook)
   return(list(threshold = corte, chartCook = chart, table = out))
 }
+dcook_result <- dcookAnalysis(modelf, dados_m[, "Potential"])
+dcook_result
 ```
 
-<!-- Observemos o QQ-Plot dos resíduos: -->
+Temos, tambem, cerca de 31 valores influentes segundo a distância de Cook.
 
-<!-- ```{r Fig2, echo=TRUE, fig.height=6.5, fig.width=12} -->
-<!-- qqnorm(lr2$residuals, main = 'QQ-Plot') -->
-<!-- qqline(lr2$residuals) -->
-<!-- ``` -->
+```{r}
+obser_r <- unique(
+  c(rownames(leverage_result),
+    rownames(dffit_result[["table"]]),
+    rownames(dcook_result)[["table"]])
+)
+print(length(obser_r))
+```
 
-<!-- Valores ajustados x Resíduos -->
+Modelos sem dados influentes
 
-<!-- ```{r Fig3, echo=TRUE, fig.height=6.5, fig.width=12} -->
-<!-- plot(lr2$fitted.values ,lr2$residuals) -->
-<!-- ``` -->
+```{r}
+dados_sem <- dados_m[!(row.names(dados_m) %in% obser_r),]
+dim(dados_sem)
+```
+
+```{r}
+model_sem <- lm(Potential ~ Age + Overall + `Skill move` + Stamina + Strength + 
+                            body_type,
+                data = dados_sem)
+summary(model_sem)
+```
+
+```{r}
+par(mfrow = c(2,2))
+plot(model_sem)
+```
+
+```{r}
+testeNorm(model_sem$residuals)
+```
+
+```{r}
+print(bptest(modelf))
+print(gqtest(modelf, fraction = 0.2, alternative = 'two.sided'))
+```
+
+A análise dos residuos acima é similar à analise feita antes de retirar os pontos. Isto é, a retirada daqueles pontos de uma vez só, pouco influenciou nos resíduos do novo modelo.
+
+A única diferença é que agora, o teste KS não rejeita a normalidade dos resíduas com um nível de significância de 5\%.
+
+Pontos de alavanca
 
 
+```{r}
+leveragePoints(model_sem)
+```
+
+Note que retirando os pontos de alavanca do modelo anterior surgem novos pontos de alavanca.
+
+Vamos a visualização dos pontos influentes com a medida DFFIT.
+
+```{r}
+dffitAnalysis(model_sem, dados_m[, "Potential"])
+```
+
+Note que retirando os pontos influentes segundo DFFIT do modelo anterior surgem novos pontos influentes.
+
+Agora, vamos então observar pontos influentes utilizando a distância Dcook
+
+```{r, collapse=TRUE}
+dcookAnalysis(model_sem, dados_m[, "Potential"])
+```
+
+Note que retirando os pontos influentes segundo DCOOK do modelo anterior surgem novos pontos influentes.
 
 
+Em razão disso, optamos pelo modelo que considera as seguintes covariáveis: "Age", "Overall", "Skill move", "Stamina", "Strength" e "body_type". E também contém todas as 500 observações.
 
+Sendo assim o modelo ajustado foi:
 
+$$
+\widehat{Potential} = 38.342 -1.018 * Age + 0.917 * Overall + 0.250 * `Skill move` + -0.036 * Stamina -0.008 * Strength -0.600 * body_typeNormal + 0.259 * body_typeStocky + 2.596 * body_typeUnique
+$$
 
+# Interpretação da varial dummie.
 
+Se o body type for "Lean" temos:
 
+$$
+\widehat{Potential} = 38.342 -1.018 * Age + 0.917 * Overall + 0.250 * `Skill move` + -0.036 * Stamina -0.008 * Strength
+$$
 
+Se o body type for "Normal" temos:
 
+$$
+\widehat{Potential} = 37.742 -1.018 * Age + 0.917 * Overall + 0.250 * `Skill move` + -0.036 * Stamina -0.008 * Strength
+$$
 
+Se o body type for "Stocky" temos:
 
+$$
+\widehat{Potential} = 38.601 -1.018 * Age + 0.917 * Overall + 0.250 * `Skill move` + -0.036 * Stamina -0.008 * Strength
+$$
 
+Se o body type for "Unique" temos:
 
+$$
+\widehat{Potential} = 40.938 -1.018 * Age + 0.917 * Overall + 0.250 * `Skill move` + -0.036 * Stamina -0.008 * Strength
+$$
 
+Ou seja:
 
+- body type "Normal": provoca uma diminuição no intercepto;
+- body type "Stocky": provoca um aumento no intercepto;
+- body type "Unique": provoca um aumento no intercepto.
 
